@@ -1,0 +1,190 @@
+# Extra tools for the CSDB (C64 Scene Database) MCP server.
+#
+# Usage:
+#   mongo-mcp-gen \
+#     --uri mongodb://dlocmercury:27017 \
+#     --db csdb \
+#     --name csdb \
+#     --output server.py \
+#     --exclude images files \
+#     --config examples/csdb_tools.yaml
+
+tools:
+
+  # ── type: find ──────────────────────────────────────────────────────────────
+  # Like a generated find_ tool but with explicit dot-path field names so
+  # you can search nested fields that the sampler might not have promoted.
+
+  - type: find
+    name: scener_releases
+    description: >
+      Find all releases a scener has credits on.
+      Searches the nested Credits.Credit.Handle.HandleText field.
+    collection: releases
+    params:
+      - name: handle_text
+        type: str
+        required: true
+        description: "Handle/alias name to search credits for (partial, case-insensitive)"
+        match: "Credits.Credit.Handle.HandleText"
+        operator: regex
+      - name: credit_type
+        type: str
+        required: false
+        description: "Filter by credit type, e.g. 'Music', 'Code', 'Graphics'"
+        match: "Credits.Credit.CreditType"
+        operator: regex
+    limit: 20
+
+  - type: find
+    name: find_handles_by_group
+    description: >
+      Find handles whose scener is or was a member of a given group.
+    collection: handles
+    params:
+      - name: group_name
+        type: str
+        required: true
+        description: "Group name (partial, case-insensitive)"
+        match: "MemberOf.Group.Name"
+        operator: regex
+    limit: 20
+
+  - type: find
+    name: find_handles_by_country
+    description: >
+      Find handles whose scener is from a given country.
+    collection: handles
+    params:
+      - name: country
+        type: str
+        required: true
+        description: "Country name, e.g. 'Sweden', 'Germany'"
+        match: "Scener.Country"
+        operator: regex
+    limit: 20
+
+  # ── type: aggregate ──────────────────────────────────────────────────────────
+  # Use {param_name} anywhere in the pipeline as a placeholder.
+  # It becomes a bare Python variable reference in the generated code,
+  # so it works for regex strings, integers, lists, etc.
+
+  - type: aggregate
+    name: group_member_countries
+    description: >
+      For a given group, count how many members came from each country.
+      Returns a ranked list of countries by member count.
+    collection: handles
+    params:
+      - name: group_name
+        type: str
+        required: true
+        description: "Group name (partial, case-insensitive)"
+    pipeline:
+      - "$match":
+          "MemberOf.Group.Name":
+            "$regex": "{group_name}"
+            "$options": "i"
+      - "$group":
+          "_id": "$Scener.Country"
+          count:
+            "$sum": 1
+      - "$sort":
+          count: -1
+
+  - type: aggregate
+    name: top_rated_releases
+    description: >
+      Find highest-rated releases, optionally filtered by type or year.
+    collection: releases
+    params:
+      - name: release_type
+        type: str
+        required: false
+        description: "e.g. 'Demo', 'Intro', 'Music', 'Game'"
+      - name: year
+        type: int
+        required: false
+        description: "Release year"
+      - name: limit
+        type: int
+        required: false
+        default: 10
+        description: "Number of results (default 10)"
+    pipeline:
+      - "$match":
+          Rating:
+            "$gt": 0
+      - "$sort":
+          Rating: -1
+      - "$limit": "{limit}"
+
+  # ── type: lookup ─────────────────────────────────────────────────────────────
+  # Two-step cross-collection tool.
+  # Step 1: find_one from a source collection.
+  #   - match: MongoDB filter (use {param} placeholders)
+  #   - result_name: variable name for the found document
+  #   - not_found: error message if find_one returns nothing
+  #   - extract: map of {variable_name: {path: "dot.path", field: "FieldName"}}
+  #     path is a dot-separated navigation through the document.
+  #     field extracts that key from each item in the final list.
+  # Step 2: aggregation pipeline on a second collection.
+  #   - pipeline: MongoDB pipeline (can reference extracted vars as {var_name})
+  #   - return_as: variable name for the aggregation results
+  #
+  # The generated function returns a dict containing all named outputs
+  # (result_name doc, extracted vars, return_as vars).
+
+  - type: lookup
+    name: bbs_member_countries
+    description: >
+      For a given BBS, find which countries its members came from.
+      Looks up the BBS to find its associated groups, then aggregates
+      handle countries for all members of those groups.
+    params:
+      - name: bbs_name
+        type: str
+        required: true
+        description: "BBS name (partial, case-insensitive)"
+    steps:
+      - collection: bbses
+        find_one: true
+        result_name: bbs_doc
+        match:
+          Name:
+            "$regex": "{bbs_name}"
+            "$options": "i"
+        not_found: "No BBS found matching '{bbs_name}'"
+        extract:
+          group_names:
+            path: "Group.Group"
+            field: "Name"
+
+      - collection: handles
+        pipeline:
+          - "$match":
+              "MemberOf.Group.Name":
+                "$in": "{group_names}"
+          - "$group":
+              "_id": "$Scener.Country"
+              count:
+                "$sum": 1
+          - "$sort":
+              count: -1
+        return_as: member_countries
+
+  # ── type: raw ────────────────────────────────────────────────────────────────
+  # Paste a raw Python @mcp.tool() function verbatim.
+  # Use this when the logic is too complex for the structured types.
+  # The code has access to: db, to_json, Optional, json, ObjectId
+
+  # Example — uncomment and adapt as needed:
+  #
+  # - type: raw
+  #   name: my_complex_tool
+  #   code: |
+  #     @mcp.tool()
+  #     def my_complex_tool(param: str) -> dict:
+  #         """Does something complex."""
+  #         result = db["collection"].find_one({"field": param})
+  #         return to_json(result) if result else {"error": "not found"}
