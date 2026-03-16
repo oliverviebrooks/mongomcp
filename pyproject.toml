@@ -16,5 +16,8 @@ dependencies = [
 [project.scripts]
 mongo-mcp-gen = "generate:main"
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
 [tool.hatch.build.targets.wheel]
 include = ["generate.py"]
